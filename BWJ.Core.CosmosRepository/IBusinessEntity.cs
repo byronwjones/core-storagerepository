@@ -6,5 +6,6 @@ namespace BWJ.Core.CosmosRepository
     {
         DateTimeOffset? Timestamp { get; set; }
         ETag ETag { get; set; }
+        string? __OriginalPartitionKey { get; set; }
     }
 }

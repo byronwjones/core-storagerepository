@@ -1,4 +1,5 @@
-﻿using Azure.Data.Tables;
+﻿using Azure;
+using Azure.Data.Tables;
 using BWJ.Core.Chronology;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -138,7 +139,15 @@ namespace BWJ.Core.CosmosRepository
         {
             var client = GetTableClient(tableNameParameters);
             var storageEntity = ConvertToStorageEntity(entity);
-            await client.UpdateEntityAsync(storageEntity, storageEntity.ETag, TableUpdateMode.Replace);
+            if(entity.__OriginalPartitionKey is not null && storageEntity.PartitionKey != entity.__OriginalPartitionKey)
+            {
+                await client.DeleteEntityAsync(entity.__OriginalPartitionKey, storageEntity.RowKey);
+                await client.AddEntityAsync(storageEntity);
+            }
+            else
+            {
+                await client.UpdateEntityAsync(storageEntity, storageEntity.ETag, TableUpdateMode.Replace);
+            }
         }
 
         /// <summary>
@@ -151,6 +160,10 @@ namespace BWJ.Core.CosmosRepository
         {
             var client = GetTableClient(tableNameParameters);
             var storageEntity = ConvertToStorageEntity(entity);
+            if (entity.__OriginalPartitionKey is not null && storageEntity.PartitionKey != entity.__OriginalPartitionKey)
+            {
+                await client.DeleteEntityAsync(entity.__OriginalPartitionKey, storageEntity.RowKey);
+            }
             await client.UpsertEntityAsync(storageEntity, TableUpdateMode.Replace);
         }
 
@@ -274,15 +287,43 @@ namespace BWJ.Core.CosmosRepository
                 typeof(int),
                 typeof(long),
                 typeof(string),
+                typeof(DateTimeOffset),
+                typeof(ETag),
             };
 
             var t = typeof(TStorageEntity);
             var invalidProperty = t.GetProperties()
-                .FirstOrDefault(p => validPropertyTypes.Contains(p.PropertyType) == false);
+                .FirstOrDefault(p => IsValidStorageEntityType(p.PropertyType) == false);
             if (invalidProperty != null)
             {
                 throw new RepositoryDataConfigurationException($"Storage entity property {t.FullName}.{invalidProperty.Name} is invalid: Type not supported by Azure Table Storage / Cosmos DB.  Valid types can be found here: https://learn.microsoft.com/en-us/rest/api/storageservices/Understanding-the-Table-Service-Data-Model?redirectedfrom=MSDN#property-types");
             }
+        }
+
+        private static bool IsValidStorageEntityType(Type type)
+        {
+            var validPropertyTypes = new Type[] {
+                typeof(byte[]),
+                typeof(bool),
+                typeof(bool?),
+                typeof(DateTime),
+                typeof(double),
+                typeof(Guid),
+                typeof(int),
+                typeof(long),
+                typeof(string),
+                typeof(DateTimeOffset),
+                typeof(ETag),
+            };
+
+            if (validPropertyTypes.Contains(type)) { return true; }
+            if (type.IsGenericType && type.Name.Contains("Nullable"))
+            {
+                var nullableType = type.GetGenericArguments()[0];
+                if (validPropertyTypes.Contains(nullableType)) { return true; }
+            }
+
+            return false;
         }
 
         private PropertyInfo GetRowKeyProperty(Type t)
@@ -316,19 +357,22 @@ namespace BWJ.Core.CosmosRepository
 
             var storagePartitionProp = ts.GetProperty("PartitionKey")!;
             var businessPartitionProp = GetPartitionKeyProperty(tb);
+            var originalPartitionProp = tb.GetProperty("__OriginalPartitionKey")!;
 
             var businessParam = Expression.Parameter(tb, "businessEntity");
             var storageParam = Expression.Parameter(ts, "storageEntity");
 
             var storageRowExp = Expression.Property(storageParam, storageRowProp);
             var businessRowExp = Expression.Property(businessParam, businessRowProp);
+            var originalPartitionExp = Expression.Property(businessParam, originalPartitionProp);
 
-            var storagePartitionExp = Expression.Property(businessParam, storagePartitionProp);
-            var businessPartitionExp = Expression.Property(storageParam, businessPartitionProp);
+            var storagePartitionExp = Expression.Property(storageParam, storagePartitionProp);
+            var businessPartitionExp = Expression.Property(businessParam, businessPartitionProp);
 
             var rowAssign = Expression.Assign(businessRowExp, storageRowExp);
             var partAssign = Expression.Assign(businessPartitionExp, storagePartitionExp);
-            var body = Expression.Block(rowAssign, partAssign);
+            var origAssign = Expression.Assign(originalPartitionExp, storagePartitionExp);
+            var body = Expression.Block(rowAssign, partAssign, origAssign);
 
             var action = Expression.Lambda<Action<TBusinessEntity, TStorageEntity>>(body, businessParam, storageParam).Compile();
             return action;
@@ -350,8 +394,8 @@ namespace BWJ.Core.CosmosRepository
             var storageRowExp = Expression.Property(storageParam, storageRowProp);
             var businessRowExp = Expression.Property(businessParam, businessRowProp);
 
-            var storagePartitionExp = Expression.Property(businessParam, storagePartitionProp);
-            var businessPartitionExp = Expression.Property(storageParam, businessPartitionProp);
+            var storagePartitionExp = Expression.Property(storageParam, storagePartitionProp);
+            var businessPartitionExp = Expression.Property(businessParam, businessPartitionProp);
 
             var rowAssign = Expression.Assign(storageRowExp, businessRowExp);
             var partAssign = Expression.Assign(storagePartitionExp, businessPartitionExp);
